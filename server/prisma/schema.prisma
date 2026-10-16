@@ -1,0 +1,134 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  AUTHOR
+  ADMIN
+}
+
+enum TicketCategory {
+  ROYALTY_PAYMENTS
+  ISBN_METADATA
+  PRINTING_QUALITY
+  DISTRIBUTION_AVAILABILITY
+  PRODUCTION_UPDATES
+  GENERAL_INQUIRY
+}
+
+enum TicketPriority {
+  CRITICAL
+  HIGH
+  MEDIUM
+  LOW
+}
+
+enum TicketStatus {
+  OPEN
+  IN_PROGRESS
+  RESOLVED
+  CLOSED
+}
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  passwordHash String
+  role         Role
+  name         String
+  createdAt    DateTime @default(now())
+
+  authorProfile    AuthorProfile?
+  assignedTickets  Ticket[]       @relation("AssignedAdmin")
+  ticketReplies    TicketReply[]
+}
+
+model AuthorProfile {
+  id         String   @id @default(cuid())
+  authorCode String   @unique
+  userId     String   @unique
+  phone      String?
+  city       String?
+  joinedDate DateTime?
+
+  user    User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  books   Book[]
+  tickets Ticket[]
+
+  @@index([authorCode])
+}
+
+model Book {
+  id                    String    @id @default(cuid())
+  bookCode              String    @unique
+  authorProfileId       String
+  title                 String
+  isbn                  String
+  genre                 String
+  publicationDate       DateTime?
+  status                String
+  mrp                   Decimal?  @db.Decimal(10, 2)
+  authorRoyaltyPerCopy  Decimal?  @db.Decimal(10, 2)
+  totalCopiesSold       Int       @default(0)
+  totalRoyaltyEarned    Decimal   @default(0) @db.Decimal(12, 2)
+  royaltyPaid           Decimal   @default(0) @db.Decimal(12, 2)
+  royaltyPending         Decimal   @default(0) @db.Decimal(12, 2)
+  lastRoyaltyPayoutDate DateTime?
+  printPartner          String?
+  availableOn           String[]  @default([])
+
+  authorProfile AuthorProfile @relation(fields: [authorProfileId], references: [id], onDelete: Cascade)
+  tickets       Ticket[]
+
+  @@index([authorProfileId])
+}
+
+model Ticket {
+  id                  String          @id @default(cuid())
+  ticketNumber        Int             @unique @default(autoincrement())
+  authorProfileId     String
+  bookId              String?
+  subject             String
+  description         String
+  category            TicketCategory
+  aiSuggestedCategory TicketCategory?
+  categoryOverridden  Boolean         @default(false)
+  priority            TicketPriority
+  aiSuggestedPriority TicketPriority?
+  priorityOverridden  Boolean         @default(false)
+  status              TicketStatus    @default(OPEN)
+  assignedAdminId     String?
+  createdAt           DateTime        @default(now())
+  updatedAt           DateTime        @updatedAt
+
+  authorProfile AuthorProfile @relation(fields: [authorProfileId], references: [id], onDelete: Cascade)
+  book          Book?         @relation(fields: [bookId], references: [id])
+  assignedAdmin User?         @relation("AssignedAdmin", fields: [assignedAdminId], references: [id])
+  replies       TicketReply[]
+
+  @@index([status])
+  @@index([category])
+  @@index([priority])
+  @@index([authorProfileId])
+  @@index([createdAt])
+}
+
+model TicketReply {
+  id             String   @id @default(cuid())
+  ticketId       String
+  authorUserId   String
+  body           String
+  isInternalNote Boolean  @default(false)
+  aiGenerated    Boolean  @default(false)
+  createdAt      DateTime @default(now())
+
+  ticket Ticket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  author User   @relation(fields: [authorUserId], references: [id])
+
+  @@index([ticketId])
+}
