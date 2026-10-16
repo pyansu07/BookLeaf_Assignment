@@ -1,4 +1,4 @@
-import { TicketCategory, TicketPriority } from "@prisma/client";
+import { TicketCategory, TicketPriority, type TicketStatus } from "@prisma/client";
 import { prisma } from "../../lib/prisma";
 import { Errors } from "../../lib/errors";
 import { emitTicketEvent } from "../../realtime";
@@ -57,15 +57,25 @@ export async function createTicket(authorProfileId: string, input: CreateTicketI
 }
 
 export async function listTicketsForAuthor(authorProfileId: string) {
-  return prisma.ticket.findMany({
+  const tickets = await prisma.ticket.findMany({
     where: { authorProfileId },
     include: ticketListInclude,
     orderBy: { createdAt: "desc" },
   });
+  return tickets.map(toAuthorView);
 }
 
+/** The cached AI draft is an internal admin artifact and must never reach authors. */
+function toAuthorView<T extends { aiDraft: string | null; aiDraftGeneratedAt: Date | null }>(ticket: T) {
+  const { aiDraft: _draft, aiDraftGeneratedAt: _generatedAt, ...rest } = ticket;
+  return rest;
+}
+
+const PRIORITY_RANK: Record<TicketPriority, number> = { CRITICAL: 0, HIGH: 1, MEDIUM: 2, LOW: 3 };
+const isUnresolved = (status: TicketStatus) => status === "OPEN" || status === "IN_PROGRESS";
+
 export async function listTicketsForAdmin(query: ListTicketsQuery, adminUserId: string) {
-  return prisma.ticket.findMany({
+  const tickets = await prisma.ticket.findMany({
     where: {
       status: query.status,
       category: query.category,
@@ -77,8 +87,15 @@ export async function listTicketsForAdmin(query: ListTicketsQuery, adminUserId: 
           : undefined,
     },
     include: ticketListInclude,
-    orderBy: [{ priority: "asc" }, { createdAt: "asc" }],
+    orderBy: { createdAt: "asc" },
   });
+
+  // Unresolved first, then most urgent, then oldest (findMany already sorted by age; sort is stable).
+  return tickets.sort(
+    (a, b) =>
+      Number(isUnresolved(b.status)) - Number(isUnresolved(a.status)) ||
+      PRIORITY_RANK[a.priority] - PRIORITY_RANK[b.priority]
+  );
 }
 
 interface AccessContext {
@@ -94,7 +111,7 @@ export async function getTicketById(ticketId: string, access: AccessContext) {
   }
 
   if (!access.isAdmin) {
-    return { ...ticket, replies: ticket.replies.filter((r) => !r.isInternalNote) };
+    return { ...toAuthorView(ticket), replies: ticket.replies.filter((r) => !r.isInternalNote) };
   }
   return ticket;
 }
@@ -103,11 +120,15 @@ export async function updateTicket(ticketId: string, adminUserId: string, input:
   const existing = await prisma.ticket.findUnique({ where: { id: ticketId } });
   if (!existing) throw Errors.notFound("Ticket not found");
 
+  const categoryChanged = input.category !== undefined && input.category !== existing.category;
+
   const ticket = await prisma.ticket.update({
     where: { id: ticketId },
     data: {
       status: input.status,
       category: input.category,
+      // The draft was grounded in the old category's KB section, so it's stale now.
+      ...(categoryChanged ? { aiDraft: null, aiDraftGeneratedAt: null } : {}),
       categoryOverridden: input.category && input.category !== existing.category ? true : undefined,
       priority: input.priority,
       priorityOverridden: input.priority && input.priority !== existing.priority ? true : undefined,
@@ -146,7 +167,11 @@ export async function addReply(
     }),
     prisma.ticket.update({
       where: { id: ticketId },
-      data: role === "ADMIN" && !isInternalNote ? { status: "IN_PROGRESS" } : {},
+      data: {
+        ...(role === "ADMIN" && !isInternalNote ? { status: "IN_PROGRESS" as const } : {}),
+        // A new message in the conversation makes any cached draft outdated.
+        ...(!isInternalNote ? { aiDraft: null, aiDraftGeneratedAt: null } : {}),
+      },
     }),
   ]);
 
@@ -157,12 +182,21 @@ export async function addReply(
   return reply;
 }
 
-export async function getAiDraft(ticketId: string) {
+/**
+ * Drafts are cached on the ticket so reopening it doesn't pay for another LLM call;
+ * `regenerate` forces a fresh one. A failed generation is not cached, so the next
+ * open retries instead of being stuck on "unavailable".
+ */
+export async function getAiDraft(ticketId: string, regenerate = false) {
   const ticket = await prisma.ticket.findUnique({
     where: { id: ticketId },
     include: { book: true, authorProfile: { include: { user: true } } },
   });
   if (!ticket) throw Errors.notFound("Ticket not found");
+
+  if (ticket.aiDraft && !regenerate) {
+    return { draft: ticket.aiDraft, cached: true, generatedAt: ticket.aiDraftGeneratedAt };
+  }
 
   const draft = await draftResponse({
     subject: ticket.subject,
@@ -174,5 +208,11 @@ export async function getAiDraft(ticketId: string) {
     royaltyPending: ticket.book ? Number(ticket.book.royaltyPending) : null,
   });
 
-  return { draft };
+  if (!draft) {
+    return { draft: null, cached: false, generatedAt: null };
+  }
+
+  const generatedAt = new Date();
+  await prisma.ticket.update({ where: { id: ticketId }, data: { aiDraft: draft, aiDraftGeneratedAt: generatedAt } });
+  return { draft, cached: false, generatedAt };
 }

@@ -82,7 +82,7 @@ ticketsRouter.get(
   "/:id/ai-draft",
   requireRole("ADMIN"),
   asyncHandler(async (req, res) => {
-    const result = await getAiDraft(req.params.id);
+    const result = await getAiDraft(req.params.id, req.query.regenerate === "true");
     res.json(result);
   })
 );
