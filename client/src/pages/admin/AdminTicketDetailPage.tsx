@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useParams } from "react-router-dom";
 import { api, getApiErrorMessage } from "../../lib/api";
 import { getSocket } from "../../lib/socket";
@@ -34,6 +34,8 @@ export function AdminTicketDetailPage() {
   const [sending, setSending] = useState(false);
   const [drafting, setDrafting] = useState(false);
   const [draftError, setDraftError] = useState<string | null>(null);
+  const [draftInfo, setDraftInfo] = useState<string | null>(null);
+  const autoDraftedFor = useRef<string | null>(null);
 
   const load = useCallback(() => {
     if (!id) return;
@@ -68,23 +70,45 @@ export function AdminTicketDetailPage() {
     }
   }
 
-  async function handleGetDraft() {
-    if (!id) return;
-    setDrafting(true);
-    setDraftError(null);
-    try {
-      const res = await api.get<{ draft: string | null }>(`/tickets/${id}/ai-draft`);
-      if (res.data.draft) {
-        setReplyBody(res.data.draft);
-      } else {
-        setDraftError("AI draft is unavailable right now (provider not configured or request failed). Please write a response manually.");
+  const fetchDraft = useCallback(
+    async (regenerate: boolean) => {
+      if (!id) return;
+      setDrafting(true);
+      setDraftError(null);
+      try {
+        const res = await api.get<{ draft: string | null; cached: boolean; generatedAt: string | null }>(
+          `/tickets/${id}/ai-draft`,
+          { params: regenerate ? { regenerate: "true" } : undefined }
+        );
+        if (res.data.draft) {
+          setReplyBody(res.data.draft);
+          setDraftInfo(
+            `AI draft${res.data.generatedAt ? ` generated ${formatDateTime(res.data.generatedAt)}` : ""}. Review and edit before sending.`
+          );
+        } else {
+          setDraftInfo(null);
+          setDraftError("AI draft is unavailable right now (provider not configured or request failed). Please write a response manually.");
+        }
+      } catch (err) {
+        setDraftError(getApiErrorMessage(err));
+      } finally {
+        setDrafting(false);
       }
-    } catch (err) {
-      setDraftError(getApiErrorMessage(err));
-    } finally {
-      setDrafting(false);
+    },
+    [id]
+  );
+
+  // Per the brief, opening a ticket should present a draft. Only when nobody has
+  // replied yet and the ticket is still open; the backend caches it so reopening is free.
+  useEffect(() => {
+    if (!ticket || !id || autoDraftedFor.current === id) return;
+    autoDraftedFor.current = id;
+    const hasPublicReply = ticket.replies.some((r) => !r.isInternalNote);
+    const isOpen = ticket.status === "OPEN" || ticket.status === "IN_PROGRESS";
+    if (!hasPublicReply && isOpen) {
+      fetchDraft(false);
     }
-  }
+  }, [ticket, id, fetchDraft]);
 
   async function handleSendReply() {
     if (!id || !replyBody.trim()) return;
@@ -92,6 +116,7 @@ export function AdminTicketDetailPage() {
     try {
       await api.post(`/tickets/${id}/replies`, { body: replyBody, isInternalNote: false });
       setReplyBody("");
+      setDraftInfo(null);
       load();
     } catch (err) {
       setError(getApiErrorMessage(err));
@@ -191,13 +216,16 @@ export function AdminTicketDetailPage() {
               </label>
               <button
                 type="button"
-                onClick={handleGetDraft}
+                onClick={() => fetchDraft(draftInfo !== null)}
                 disabled={drafting}
                 className="rounded-md border border-slate-300 px-2 py-1 text-xs font-medium text-slate-600 hover:bg-slate-50 disabled:opacity-60"
               >
-                {drafting ? "Drafting..." : "Generate AI draft"}
+                {drafting ? "Drafting..." : draftInfo ? "Regenerate AI draft" : "Generate AI draft"}
               </button>
             </div>
+            {draftInfo && !draftError && (
+              <p className="rounded-md bg-blue-50 px-2 py-1.5 text-xs text-blue-800">{draftInfo}</p>
+            )}
             {draftError && <p className="rounded-md bg-amber-50 px-2 py-1.5 text-xs text-amber-800">{draftError}</p>}
             <textarea
               id="reply"
