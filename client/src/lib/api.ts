@@ -1,6 +1,11 @@
 import axios from "axios";
 
-export const api = axios.create({ baseURL: "/api" });
+// In dev, VITE_API_URL is unset and "/api" is handled by the Vite proxy (vite.config.ts).
+// In production the frontend and backend are on different origins, so VITE_API_URL
+// must point at the deployed backend (e.g. https://bookleaf-api.onrender.com).
+const apiBaseUrl = import.meta.env.VITE_API_URL ? `${import.meta.env.VITE_API_URL}/api` : "/api";
+
+export const api = axios.create({ baseURL: apiBaseUrl });
 
 export function setAuthToken(token: string | null) {
   if (token) {
